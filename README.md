@@ -123,14 +123,6 @@ When multiple certificates are present in a file, the script automatically perfo
 2. If a custom CA file is provided, tries verification with it
 3. Finally attempts verification using the system's CA store
 
-## License
-
-This script is released under the [WTFPL License](https://en.wikipedia.org/wiki/WTFPL).
-
-## Contributing
-
-Feel free to submit issues and pull requests.
-
 ## macOS Keychain Integration
 
 The script can fetch and verify complete certificate chains from the macOS keychain using the `-n` or `--chain` option. This feature:
@@ -140,5 +132,14 @@ The script can fetch and verify complete certificate chains from the macOS keych
 - Stops when it reaches a root (self-signed) certificate
 - Displays and verifies the complete chain
 
-Example output when fetching a chain:
+
+## License
+
+This script is released under the [WTFPL License](https://en.wikipedia.org/wiki/WTFPL).
+
+## Contributing
+
+Feel free to submit issues and pull requests.
+
+
 
