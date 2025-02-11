@@ -40,6 +40,7 @@ usage() {
     echo "  -c, --ca-file <file>  Specify a custom Root CA file for chain verification."
     echo "  -d, --dir <dir>       Check all certificate files in specified directory."
     echo "  -p, --pattern <pat>   Check files matching pattern (e.g., '*.pem,*.p12')."
+    echo "  -s, --stdin           Read certificate from stdin."
     echo
     echo "Examples:"
     echo "  $0 cert.pem                         # Check single file"
@@ -207,13 +208,21 @@ verify_chain() {
 process_file() {
     local file="$1"
     local ca_file="$2"
+    local from_stdin="$3"  # New parameter to indicate if input is from stdin
 
-    if [ ! -f "$file" ]; then
+    if [ "$from_stdin" = "true" ]; then
+        echo "=== Checking certificate from stdin ==="
+        # Create a temporary file for the stdin content
+        local tempFile="/tmp/certcheck_stdin_$$.pem"
+        cat > "$tempFile"
+        trap 'rm -f "$tempFile"' EXIT
+        file="$tempFile"
+    elif [ ! -f "$file" ]; then
         echo "Error: File '$file' not found."
         return 1
+    else
+        echo "=== Checking file: $file ==="
     fi
-
-    echo "=== Checking file: $file ==="
 
     # Reset cert_count for each file
     cert_count=0
@@ -306,6 +315,9 @@ process_file() {
 # main
 ###############################################################################
 main() {
+    # Add -s or --stdin option
+    local from_stdin=false
+
     # Parse command-line options
     local ca_file=""
     local dir=""
@@ -344,6 +356,10 @@ main() {
                     exit 1
                 fi
                 ;;
+            -s|--stdin)
+                from_stdin=true
+                shift
+                ;;
             *)
                 files+=("$1")
                 shift
@@ -351,8 +367,9 @@ main() {
         esac
     done
 
-    # Handle directory scanning
-    if [ -n "$dir" ]; then
+    if [ "$from_stdin" = true ]; then
+        process_file "" "$ca_file" "true"
+    elif [ -n "$dir" ]; then
         if [ ! -d "$dir" ]; then
             echo "Error: Directory '$dir' not found."
             exit 1
