@@ -41,12 +41,14 @@ usage() {
     echo "  -d, --dir <dir>       Check all certificate files in specified directory."
     echo "  -p, --pattern <pat>   Check files matching pattern (e.g., '*.pem,*.p12')."
     echo "  -s, --stdin           Read certificate from stdin."
+    echo "  -n, --chain <name>    Check certificate chain from keychain by common name."
     echo
     echo "Examples:"
     echo "  $0 cert.pem                         # Check single file"
-    echo "  $0 -d /path/to/certs                # Check all certs in directory, pass . as argument for current directory"
+    echo "  $0 -d /path/to/certs                # Check all certs in directory"
     echo "  $0 -p '*.pem,*.p12'                 # Check files matching patterns"
     echo "  $0 -c /path/to/rootCA.pem cert.p12  # Check with custom CA"
+    echo "  $0 -n \"I052341\"                   # Check full chain from keychain"
     exit 1
 }
 
@@ -204,111 +206,198 @@ verify_chain() {
     return 1
 }
 
-# Process a single certificate file
-process_file() {
-    local file="$1"
-    local ca_file="$2"
-    local from_stdin="$3"  # New parameter to indicate if input is from stdin
+###############################################################################
+# parse_cert_info
+#
+#   Takes the text of a single certificate and prints Subject, Issuer,
+#   NotBefore, NotAfter, and expiry status.
+###############################################################################
+parse_cert_info() {
+    local cert_text="$1"
+    cert_count=1  # Set to 1 since we're processing a single certificate
+    echo "Certificate #1:"
+    parse_single_cert "$cert_text"
+    echo "---------------------------"
+}
 
-    if [ "$from_stdin" = "true" ]; then
-        echo "=== Checking certificate from stdin ==="
-        # Create a temporary file for the stdin content
-        local tempFile="/tmp/certcheck_stdin_$$.pem"
-        cat > "$tempFile"
-        trap 'rm -f "$tempFile"' EXIT
-        file="$tempFile"
-    elif [ ! -f "$file" ]; then
-        echo "Error: File '$file' not found."
+# Function to process PKCS#12 files
+process_pkcs12() {
+    local file="$1"
+    local tempPem="/tmp/certcheck_temp_$$.pem"
+    trap 'rm -f "$tempPem"' EXIT
+
+    # Extract all certificates (both CA and client certs)
+    # Use -chain to ensure we get the complete certificate chain
+    if ! openssl pkcs12 -in "$file" -nokeys -nodes -chain -out "$tempPem" 2>/dev/null; then
+        echo "Error: Failed to extract certificates from PKCS#12 file."
+        echo "This could be due to password protection or file corruption."
         return 1
-    else
-        echo "=== Checking file: $file ==="
     fi
 
-    # Reset cert_count for each file
-    cert_count=0
+    # Process the extracted certificates
+    local all_certs_text
+    all_certs_text=$(openssl crl2pkcs7 -nocrl -certfile "$tempPem" 2>/dev/null | \
+                    openssl pkcs7 -print_certs -text -noout 2>/dev/null)
 
-    if grep -Fq -- "-----BEGIN CERTIFICATE-----" "$file"; then
-        # ---------------------------------------------------------------------
-        # It's PEM
-        # ---------------------------------------------------------------------
-        debug "File appears to be PEM (contains 'BEGIN CERTIFICATE')."
-
-        # Convert (PEM -> PKCS7) -> text and capture the output
-        local all_certs_text
-        all_certs_text=$(
-            openssl crl2pkcs7 -nocrl -certfile "$file" 2>/dev/null \
-            | openssl pkcs7 -print_certs -text -noout 2>/dev/null \
-            | sed '/-----BEGIN CERTIFICATE-----/d' \
-              | sed '/-----END CERTIFICATE-----/d'
-        )
-
-        # Check if conversion was successful
-        if [ -z "$all_certs_text" ]; then
-            echo "Error: Failed to process PEM file."
-            exit 1
-        fi
-
-        # Parse each certificate
+    if [ $? -eq 0 ] && [ -n "$all_certs_text" ]; then
         parse_certs_info "$all_certs_text"
-
-        # Verify chain only if multiple certificates are present
-        if (( cert_count > 1 )); then
-            echo "Complete Chain Verification:"
-            verify_chain "$file" "$ca_file"
-        else
-            echo "Note: Only one certificate found. Skipping full chain verification."
-        fi
-
-    else
-        # ---------------------------------------------------------------------
-        # It's PKCS#12 (because there's no "-----BEGIN CERTIFICATE-----")
-        # ---------------------------------------------------------------------
-        debug "File is likely PKCS#12 (no BEGIN CERTIFICATE found)."
-
-        # Extract all public certs into unencrypted PEM (prompts once if needed)
-        local tempPem="/tmp/certcheck_temp_$$.pem"
-        # Use trap to ensure tempPem is deleted on exit
-        trap 'rm -f "$tempPem"' EXIT
-
-        if ! openssl pkcs12 \
-            -in "$file" \
-            -nokeys -clcerts -nodes \
-            -out "$tempPem" >/dev/null 2>&1
-        then
-            echo "Failed to decode file as PKCS#12."
-            exit 1
-        fi
-
-        # Convert that unencrypted PEM to text and capture the output
-        local all_certs_text
-        all_certs_text=$(
-            openssl crl2pkcs7 -nocrl -certfile "$tempPem" 2>/dev/null \
-            | openssl pkcs7 -print_certs -text -noout 2>/dev/null \
-            | sed '/-----BEGIN CERTIFICATE-----/d' \
-              | sed '/-----END CERTIFICATE-----/d'
-        )
-
-        # Check if conversion was successful
-        if [ -z "$all_certs_text" ]; then
-            echo "Error: Failed to process extracted PEM from PKCS#12."
-            exit 1
-        fi
-
-        # Parse each certificate
-        parse_certs_info "$all_certs_text"
-
-        # Verify chain only if multiple certificates are present
         if (( cert_count > 1 )); then
             echo "Complete Chain Verification:"
             verify_chain "$tempPem" "$ca_file"
-        else
-            echo "Note: Only one certificate found. Skipping full chain verification."
         fi
+    else
+        # Try alternative method if the first one fails
+        all_certs_text=$(openssl x509 -in "$tempPem" -text -noout 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$all_certs_text" ]; then
+            parse_cert_info "$all_certs_text"
+        else
+            echo "Error: Failed to process extracted certificates"
+            return 1
+        fi
+    fi
+}
 
-        # Cleanup is handled by trap
+# Function to detect if file is PKCS#12
+is_pkcs12() {
+    local file="$1"
+    # Try multiple detection methods
+    if file "$file" | grep -qi "PKCS.*12"; then
+        return 0  # File command identifies it as PKCS#12
+    elif openssl pkcs12 -info -in "$file" -nokeys -nomacver -password pass: 2>&1 | grep -q "PKCS7"; then
+        return 0  # OpenSSL identifies it as PKCS#12
+    elif [[ "$file" =~ \.(pfx|p12)$ ]]; then
+        return 0  # File extension suggests PKCS#12
+    fi
+    return 1  # Not a PKCS#12 file or can't be read
+}
+
+# Function to process PEM files
+process_pem() {
+    local file="$1"
+    local cert_text
+    local all_certs_text
+
+    if [ "$file" = "" ]; then
+        # Reading from stdin
+        all_certs_text=$(cat - | openssl crl2pkcs7 -nocrl -certfile /dev/stdin 2>/dev/null | \
+                        openssl pkcs7 -print_certs -text -noout 2>/dev/null)
+    else
+        all_certs_text=$(openssl crl2pkcs7 -nocrl -certfile "$file" 2>/dev/null | \
+                        openssl pkcs7 -print_certs -text -noout 2>/dev/null)
     fi
 
-    echo
+    if [ $? -eq 0 ] && [ -n "$all_certs_text" ]; then
+        parse_certs_info "$all_certs_text"
+        if (( cert_count > 1 )); then
+            echo "Complete Chain Verification:"
+            if [ "$file" = "" ]; then
+                # For stdin, we need to create a temporary file
+                local tempPem="/tmp/certcheck_temp_$$.pem"
+                trap 'rm -f "$tempPem"' EXIT
+                cat - > "$tempPem"
+                verify_chain "$tempPem" "$ca_file"
+            else
+                verify_chain "$file" "$ca_file"
+            fi
+        fi
+        return 0
+    fi
+
+    # Try as single certificate if bundle processing failed
+    if [ "$file" = "" ]; then
+        cert_text=$(cat - | openssl x509 -text -noout 2>/dev/null)
+    else
+        cert_text=$(openssl x509 -in "$file" -text -noout 2>/dev/null)
+    fi
+
+    if [ $? -eq 0 ]; then
+        parse_cert_info "$cert_text"
+        return 0
+    fi
+
+    echo "Error: File is neither a valid certificate nor a certificate bundle"
+    return 1
+}
+
+# Main processing function
+process_file() {
+    local file="$1"
+    local from_stdin="$2"
+
+    if [ "$from_stdin" = "true" ]; then
+        process_pem ""
+        return
+    fi
+
+    echo "=== Checking file: $file ==="
+
+    # First try to detect if it's a PKCS#12 file
+    if is_pkcs12 "$file"; then
+        echo "Detected PKCS#12 format..."
+        process_pkcs12 "$file"
+    else
+        # Try processing as PEM/regular certificate
+        process_pem "$file"
+    fi
+}
+
+# Function to get certificate chain from keychain
+get_chain_from_keychain() {
+    local name="$1"
+    local tempPem="/tmp/certcheck_temp_$$.pem"
+    trap 'rm -f "$tempPem"' EXIT
+
+    echo "Fetching certificate chain from keychain..."
+
+    # Get the end-entity certificate
+    echo "Getting certificate for CN=$name"
+    if ! security find-certificate -c "$name" -p > "$tempPem" 2>/dev/null; then
+        echo "Error: Could not find certificate with CN=$name in keychain"
+        return 1
+    fi
+
+    # Get the issuer's CN
+    local issuer
+    echo "Getting issuer for $name"
+    issuer=$(openssl x509 -in "$tempPem" -noout -issuer 2>/dev/null | sed -n 's/.*CN=\([^,]*\).*/\1/p')
+    echo "Found issuer: $issuer"
+
+    while [ -n "$issuer" ]; do
+        echo "Getting certificate for issuer CN=$issuer"
+        # Append the issuer's certificate
+        if ! security find-certificate -c "$issuer" -p >> "$tempPem" 2>/dev/null; then
+            echo "Warning: Could not find issuer certificate with CN=$issuer in keychain"
+            break
+        fi
+
+        # Get the next issuer before checking if we're at the root
+        local next_issuer
+        next_issuer=$(security find-certificate -c "$issuer" -p 2>/dev/null | \
+                     openssl x509 -noout -issuer 2>/dev/null | \
+                     sed -n 's/.*CN=\([^,]*\).*/\1/p')
+
+        # Check if this is a root (self-signed) certificate
+        local subject
+        subject=$(security find-certificate -c "$issuer" -p 2>/dev/null | \
+                 openssl x509 -noout -subject 2>/dev/null | \
+                 sed -n 's/.*CN=\([^,]*\).*/\1/p')
+
+        if [ "$subject" = "$issuer" ] && [ "$next_issuer" = "$issuer" ]; then
+            echo "Found root certificate (self-signed): $subject"
+            break
+        fi
+
+        if [ -z "$next_issuer" ]; then
+            echo "No further issuer found after: $issuer"
+            break
+        fi
+
+        issuer="$next_issuer"
+        echo "Next issuer: $issuer"
+    done
+
+    echo "Processing complete certificate chain..."
+    process_pem "$tempPem"
 }
 
 ###############################################################################
@@ -317,6 +406,7 @@ process_file() {
 main() {
     # Add -s or --stdin option
     local from_stdin=false
+    local chain_name=""
 
     # Parse command-line options
     local ca_file=""
@@ -360,6 +450,15 @@ main() {
                 from_stdin=true
                 shift
                 ;;
+            -n|--chain)
+                if [[ -n "$2" && ! "$2" =~ ^- ]]; then
+                    chain_name="$2"
+                    shift 2
+                else
+                    echo "Error: --chain requires a certificate common name."
+                    exit 1
+                fi
+                ;;
             *)
                 files+=("$1")
                 shift
@@ -367,8 +466,10 @@ main() {
         esac
     done
 
-    if [ "$from_stdin" = true ]; then
-        process_file "" "$ca_file" "true"
+    if [ -n "$chain_name" ]; then
+        get_chain_from_keychain "$chain_name"
+    elif [ "$from_stdin" = true ]; then
+        process_file "" "true"
     elif [ -n "$dir" ]; then
         if [ ! -d "$dir" ]; then
             echo "Error: Directory '$dir' not found."
@@ -377,7 +478,7 @@ main() {
         cd "$dir" || exit 1
         # Find all certificate files in directory
         while IFS= read -r -d '' file; do
-            process_file "$file" "$ca_file"
+            process_file "$file" "false"
         done < <(find . -maxdepth 1 -type f \( -name "*.pem" -o -name "*.p12" -o -name "*.pfx" -o -name "*.crt" \) -print0)
     # Handle pattern matching
     elif [ -n "$pattern" ]; then
@@ -387,13 +488,13 @@ main() {
             pat="${pat// /}"
             # Check if any files match the pattern
             for file in $pat; do
-                [ -f "$file" ] && process_file "$file" "$ca_file"
+                [ -f "$file" ] && process_file "$file" "false"
             done
         done
     # Handle explicit file list
     elif [ ${#files[@]} -gt 0 ]; then
         for file in "${files[@]}"; do
-            process_file "$file" "$ca_file"
+            process_file "$file" "false"
         done
     else
         echo "Error: No input files specified."
