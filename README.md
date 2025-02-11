@@ -19,6 +19,8 @@ A robust Bash script for checking and validating X.509 certificates in PEM and P
   - Check single certificate file
   - Scan entire directories
   - Process files matching specific patterns
+  - Read certificates from stdin
+  - Fetch and verify certificate chains from macOS keychain
 
 ## Prerequisites
 
@@ -62,6 +64,8 @@ chmod +x certcheck.sh
 - `-c, --ca-file <file>`: Specify a custom Root CA file for chain verification
 - `-d, --dir <dir>`: Check all certificate files in specified directory
 - `-p, --pattern <pat>`: Check files matching pattern (e.g., '*.pem,*.p12')
+- `-s, --stdin`: Read certificate from standard input
+- `-n, --chain <name>`: Check certificate chain from macOS keychain by common name
 
 ### Examples
 
@@ -84,6 +88,14 @@ Check files matching specific patterns:
 Verify with a custom CA file:
 
 ./certcheck.sh -c /path/to/rootCA.pem cert.p12
+
+Read certificate from stdin:
+
+cat cert.pem | ./certcheck.sh -s
+
+Check certificate chain from macOS keychain:
+
+./certcheck.sh -n "I052341"
 
 ## Exit Codes
 
@@ -118,4 +130,15 @@ This script is released under the [WTFPL License](https://en.wikipedia.org/wiki/
 ## Contributing
 
 Feel free to submit issues and pull requests.
+
+## macOS Keychain Integration
+
+The script can fetch and verify complete certificate chains from the macOS keychain using the `-n` or `--chain` option. This feature:
+
+- Retrieves the specified certificate by Common Name (CN)
+- Automatically follows the chain of trust by fetching each issuer certificate
+- Stops when it reaches a root (self-signed) certificate
+- Displays and verifies the complete chain
+
+Example output when fetching a chain:
 
